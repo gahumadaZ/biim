@@ -7,10 +7,11 @@ from collections import deque
 from hls.segment import Segment
 
 class M3U8:
-  def __init__(self, target_duration, part_target, list_size, hasInit = False):
+  def __init__(self, target_duration, part_target, list_size, hasInit = False, prefix=''):
     self.media_sequence = 0
     self.list_size = list_size
     self.hasInit = hasInit
+    self.prefix = prefix
     self.segments = deque()
 
   def in_range(self, msn):
@@ -98,7 +99,7 @@ class M3U8:
     m3u8 += f'#EXT-X-MEDIA-SEQUENCE:{self.media_sequence}\n'
 
     if self.hasInit:
-      m3u8 += f'#EXT-X-MAP:URI="init"\n'
+      m3u8 += f'#EXT-X-MAP:URI="{self.prefix}init"\n'
 
     for seg_index, segment in enumerate(self.segments):
       msn = self.media_sequence + seg_index
@@ -107,12 +108,12 @@ class M3U8:
       for part_index, partial in enumerate(segment):
         hasIFrame = ',INDEPENDENT=YES' if partial.hasIFrame else ''
         if not partial.isCompleted():
-          m3u8 += f'#EXT-X-PRELOAD-HINT:TYPE=PART,URI="part?msn={msn}&part={part_index}"{hasIFrame}\n'
+          m3u8 += f'#EXT-X-PRELOAD-HINT:TYPE=PART,URI="{self.prefix}part?msn={msn}&part={part_index}"{hasIFrame}\n'
         else:
-          m3u8 += f'#EXT-X-PART:DURATION={partial.extinf().total_seconds()},URI="part?msn={msn}&part={part_index}"{hasIFrame}\n'
+          m3u8 += f'#EXT-X-PART:DURATION={partial.extinf().total_seconds()},URI="{self.prefix}part?msn={msn}&part={part_index}"{hasIFrame}\n'
 
       if segment.isCompleted():
         m3u8 += f'#EXTINF:{segment.extinf().total_seconds():.06f}\n'
-        m3u8 += f'segment?msn={msn}\n'
+        m3u8 += f'{self.prefix}segment?msn={msn}\n'
 
     return m3u8

@@ -56,67 +56,95 @@ async def main():
 
   args = parser.parse_args()
 
-  m3u8 = M3U8(args.target_duration, args.part_duration, args.list_size, True)
-  init = asyncio.Future()
+  video_m3u8 = M3U8(args.target_duration, args.part_duration, args.list_size, True, 'v_')
+  p_audio_m3u8 = M3U8(args.target_duration, args.part_duration, args.list_size, True, 'p_a_')
+  s_audio_m3u8 = M3U8(args.target_duration, args.part_duration, args.list_size, True, 's_a_')
+  video_init, p_audio_init, s_audio_init = asyncio.Future(), asyncio.Future(), asyncio.Future()
 
-  async def playlist(request):
-    nonlocal m3u8
-    msn = request.query['_HLS_msn'] if '_HLS_msn' in request.query else None
-    part = request.query['_HLS_part'] if '_HLS_part' in request.query else None
+  async def master(request):
+    text = ''
+    text += f'#EXTM3U\n'
+    text += f'#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="Audio",LANGUAGE="jp",NAME="主音声",AUTOSELECT=YES,DEFAULT=YES,URI="p_a_playlist.m3u8"\n'
+    text += f'#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="Audio",LANGUAGE="jp",NAME="副音声",AUTOSELECT=NO,URI="s_a_playlist.m3u8"\n'
+    text += f'#EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO="Audio"\n'
+    text += f'v_playlist.m3u8\n'
+    return web.Response(headers={'Access-Control-Allow-Origin': '*'}, text=text, content_type="application/x-mpegURL")
 
-    if msn is None and part is None:
-      return web.Response(headers={'Access-Control-Allow-Origin': '*'}, text=m3u8.manifest(), content_type="application/x-mpegURL")
-    else:
+  def generate_handler(m3u8, init, prefix):
+    async def playlist(request):
+      nonlocal m3u8
+      msn = request.query['_HLS_msn'] if '_HLS_msn' in request.query else None
+      part = request.query['_HLS_part'] if '_HLS_part' in request.query else None
+
+      if msn is None and part is None:
+        return web.Response(headers={'Access-Control-Allow-Origin': '*'}, text=m3u8.manifest(), content_type="application/x-mpegURL")
+      else:
+        msn = int(msn)
+        if part is None: part = 0
+        part = int(part)
+        future = m3u8.future(msn, part)
+        if future is None:
+          return web.Response(headers={'Access-Control-Allow-Origin': '*'}, status=400, content_type="application/x-mpegURL")
+
+        result = await future
+        return web.Response(headers={'Access-Control-Allow-Origin': '*'}, text=result, content_type="application/x-mpegURL")
+    async def segment(request):
+      nonlocal m3u8
+      msn = request.query['msn'] if 'msn' in request.query else None
+
+      if msn is None: msn = 0
+      msn = int(msn)
+      future = m3u8.segment(msn)
+      if future is None:
+        return web.Response(headers={'Access-Control-Allow-Origin': '*'}, status=400, content_type="video/mp4")
+
+      body = await future
+      return web.Response(headers={'Access-Control-Allow-Origin': '*'}, body=body, content_type="video/mp4")
+    async def partial(request):
+      nonlocal m3u8
+      msn = request.query['msn'] if 'msn' in request.query else None
+      part = request.query['part'] if 'part' in request.query else None
+
+      if msn is None: msn = 0
       msn = int(msn)
       if part is None: part = 0
       part = int(part)
-      future = m3u8.future(msn, part)
+      future = m3u8.partial(msn, part)
       if future is None:
-        return web.Response(headers={'Access-Control-Allow-Origin': '*'}, status=400, content_type="application/x-mpegURL")
+        return web.Response(headers={'Access-Control-Allow-Origin': '*'}, status=400, content_type="video/mp4")
 
-      result = await future
-      return web.Response(headers={'Access-Control-Allow-Origin': '*'}, text=result, content_type="application/x-mpegURL")
-  async def segment(request):
-    nonlocal m3u8
-    msn = request.query['msn'] if 'msn' in request.query else None
+      body = await future
+      return web.Response(headers={'Access-Control-Allow-Origin': '*'}, body=body, content_type="video/mp4")
+    async def initalization(request):
+      if init is None:
+        return web.Response(headers={'Access-Control-Allow-Origin': '*'}, status=400, content_type="video/mp4")
 
-    if msn is None: msn = 0
-    msn = int(msn)
-    future = m3u8.segment(msn)
-    if future is None:
-      return web.Response(headers={'Access-Control-Allow-Origin': '*'}, status=400, content_type="video/mp4")
-
-    body = await future
-    return web.Response(headers={'Access-Control-Allow-Origin': '*'}, body=body, content_type="video/mp4")
-  async def partial(request):
-    nonlocal m3u8
-    msn = request.query['msn'] if 'msn' in request.query else None
-    part = request.query['part'] if 'part' in request.query else None
-
-    if msn is None: msn = 0
-    msn = int(msn)
-    if part is None: part = 0
-    part = int(part)
-    future = m3u8.partial(msn, part)
-    if future is None:
-      return web.Response(headers={'Access-Control-Allow-Origin': '*'}, status=400, content_type="video/mp4")
-
-    body = await future
-    return web.Response(headers={'Access-Control-Allow-Origin': '*'}, body=body, content_type="video/mp4")
-  async def initalization(request):
-    if init is None:
-      return web.Response(headers={'Access-Control-Allow-Origin': '*'}, status=400, content_type="video/mp4")
-
-    body = await init
-    return web.Response(headers={'Access-Control-Allow-Origin': '*'}, body=body, content_type="video/mp4")
+      body = await init
+      return web.Response(headers={'Access-Control-Allow-Origin': '*'}, body=body, content_type="video/mp4")
+    return playlist, segment, partial, initalization
+  video_playlist, video_segment, video_partial, video_initalization = generate_handler(video_m3u8, video_init, "v_")
+  p_audio_playlist, p_audio_segment, p_audio_partial, p_audio_initalization = generate_handler(p_audio_m3u8, p_audio_init, "p_a_")
+  s_audio_playlist, s_audio_segment, s_audio_partial, s_audio_initalization = generate_handler(s_audio_m3u8, s_audio_init, "s_a_")
 
   # setup aiohttp
   app = web.Application()
   app.add_routes([
-    web.get('/playlist.m3u8', playlist),
-    web.get('/segment', segment),
-    web.get('/part', partial),
-    web.get('/init', initalization),
+    web.get('/master.m3u8', master),
+
+    web.get('/v_playlist.m3u8', video_playlist),
+    web.get('/v_segment', video_segment),
+    web.get('/v_part', video_partial),
+    web.get('/v_init', video_initalization),
+
+    web.get('/p_a_playlist.m3u8', p_audio_playlist),
+    web.get('/p_a_segment', p_audio_segment),
+    web.get('/p_a_part', p_audio_partial),
+    web.get('/p_a_init', p_audio_initalization),
+
+    web.get('/s_a_playlist.m3u8', s_audio_playlist),
+    web.get('/s_a_segment', s_audio_segment),
+    web.get('/s_a_part', s_audio_partial),
+    web.get('/s_a_init', s_audio_initalization),
   ])
   runner = web.AppRunner(app)
   await runner.setup()
@@ -125,28 +153,33 @@ async def main():
   # setup reader
   PAT_Parser = SectionParser(PATSection)
   PMT_Parser = SectionParser(PMTSection)
-  AAC_PES_Parser = PESParser(PES)
   H265_PES_Parser = PESParser(H265PES)
   ID3_PES_Parser = PESParser(PES)
+  AAC_PES_Parsers = dict()
 
   PMT_PID = None
   PCR_PID = None
-  AAC_PID = None
   H265_PID = None
   ID3_PID = None
 
-  AAC_CONFIG = None
+  AAC_PIDS = []
+  FST_AAC_PID = None
+  SND_AAC_PID = None
+  FST_AAC_CONFIG = None
+  SND_AAC_CONFIG = None
 
   H265_DEQUE = deque()
   H265_FRAGMENTS = deque()
-  AAC_FRAGMENTS = deque()
   EMSG_FRAGMENTS = deque()
+  AAC_FRAGMENTS_LIST = []
+
+  AAC_INITS = [p_audio_init, s_audio_init]
+  AAC_M3U8S = [p_audio_m3u8, s_audio_m3u8]
 
   VPS = None
   SPS = None
   PPS = None
 
-  INITIALIZATION_SEGMENT_DISPATCHED = False
   PARTIAL_BEGIN_TIMESTAMP = None
 
   reader = asyncio.StreamReader()
@@ -196,7 +229,10 @@ async def main():
           if stream_type == 0x24:
             H265_PID = elementary_PID
           elif stream_type == 0x0F:
-            AAC_PID = elementary_PID
+            if elementary_PID not in AAC_PIDS and len(AAC_PIDS) < 2:
+              AAC_PIDS.append(elementary_PID)
+              AAC_PES_Parsers[elementary_PID] = PESParser(PES)
+              AAC_FRAGMENTS_LIST.append(deque())
           elif stream_type == 0x15:
             ID3_PID = elementary_PID
 
@@ -207,7 +243,11 @@ async def main():
         ID3 = ID3_PES.PES_packet_data()
         EMSG_FRAGMENTS.append(emsg(ts.HZ, timestamp, None, 'https://aomedia.org/emsg/ID3', ID3))
 
-    elif ts.pid(packet) == AAC_PID:
+    elif ts.pid(packet) in AAC_PIDS:
+      index = AAC_PIDS.index(ts.pid(packet))
+      if ts.pid(packet) not in AAC_PES_Parsers: continue
+      AAC_PES_Parser = AAC_PES_Parsers[ts.pid(packet)]
+
       AAC_PES_Parser.push(packet)
       for AAC_PES in AAC_PES_Parser:
         timestamp = AAC_PES.pts()
@@ -217,20 +257,31 @@ async def main():
           samplingFrequencyIndex = ((ADTS_AAC[begin + 2] & 0b00111100) >> 2)
           channelConfiguration = ((ADTS_AAC[begin + 2] & 0b00000001) << 2) | ((ADTS_AAC[begin + 3] & 0b11000000) >> 6)
           frameLength = ((ADTS_AAC[begin + 3] & 0x03) << 11) | (ADTS_AAC[begin + 4] << 3) | ((ADTS_AAC[begin + 5] & 0xE0) >> 5)
-          if not AAC_CONFIG:
-            """
-            AAC_CONFIG = (bytes([0x11, 0x90, 0x56, 0xe5, 0x00]), 2, 48000)
-            """
+
+          if not AAC_INITS[index].done():
             AAC_CONFIG = (bytes([
               ((profile + 1) << 3) | ((samplingFrequencyIndex & 0x0E) >> 1),
               ((samplingFrequencyIndex & 0x01) << 7) | (channelConfiguration << 3)
             ]), channelConfiguration, SAMPLING_FREQUENCY[samplingFrequencyIndex])
+            AAC_INITS[index].set_result(b''.join([
+              ftyp(),
+              moov(
+                mvhd(ts.HZ),
+                mvex([
+                  trex(1),
+                ]),
+                [
+                  mp4aTrack(1, ts.HZ, *AAC_CONFIG),
+                ]
+              )
+            ]))
+
           duration = 1024 * ts.HZ // SAMPLING_FREQUENCY[samplingFrequencyIndex]
-          AAC_FRAGMENTS.append(
+          AAC_FRAGMENTS_LIST[index].append(
             b''.join([
               moof(0,
                 [
-                  (2, duration, timestamp, 0, [(frameLength - 7, duration, False, 0)])
+                  (1, duration, timestamp, 0, [(frameLength - 7, duration, False, 0)])
                 ]
               ),
               mdat(bytes(ADTS_AAC[begin + 7: begin + frameLength]))
@@ -278,38 +329,43 @@ async def main():
             ])
           )
 
-        if VPS and SPS and PPS and AAC_CONFIG and not INITIALIZATION_SEGMENT_DISPATCHED:
-          init.set_result(b''.join([
+        if VPS and SPS and PPS and not video_init.done():
+          video_init.set_result(b''.join([
             ftyp(),
             moov(
               mvhd(ts.HZ),
               mvex([
                 trex(1),
-                trex(2)
               ]),
               [
                 hevcTrack(1, ts.HZ, VPS, SPS, PPS),
-                mp4aTrack(2, ts.HZ, *AAC_CONFIG),
               ]
             )
           ]))
-          INITIALIZATION_SEGMENT_DISPATCHED = True
 
         if hasIDR:
           PARTIAL_BEGIN_TIMESTAMP = timestamp
-          m3u8.completeSegment(PARTIAL_BEGIN_TIMESTAMP)
-          m3u8.newSegment(PARTIAL_BEGIN_TIMESTAMP, True)
+          video_m3u8.completeSegment(PARTIAL_BEGIN_TIMESTAMP)
+          p_audio_m3u8.completeSegment(PARTIAL_BEGIN_TIMESTAMP)
+          s_audio_m3u8.completeSegment(PARTIAL_BEGIN_TIMESTAMP)
+          video_m3u8.newSegment(PARTIAL_BEGIN_TIMESTAMP, True)
+          p_audio_m3u8.newSegment(PARTIAL_BEGIN_TIMESTAMP, True)
+          s_audio_m3u8.newSegment(PARTIAL_BEGIN_TIMESTAMP, True)
         elif PARTIAL_BEGIN_TIMESTAMP is not None:
           PART_DIFF = (timestamp - PARTIAL_BEGIN_TIMESTAMP + ts.PCR_CYCLE) % ts.PCR_CYCLE
           if args.part_duration * ts.HZ < PART_DIFF:
             PARTIAL_BEGIN_TIMESTAMP = timestamp
-            m3u8.completePartial(PARTIAL_BEGIN_TIMESTAMP)
-            m3u8.newPartial(PARTIAL_BEGIN_TIMESTAMP)
+            video_m3u8.completePartial(PARTIAL_BEGIN_TIMESTAMP)
+            p_audio_m3u8.completePartial(PARTIAL_BEGIN_TIMESTAMP)
+            s_audio_m3u8.completePartial(PARTIAL_BEGIN_TIMESTAMP)
+            video_m3u8.newPartial(PARTIAL_BEGIN_TIMESTAMP)
+            p_audio_m3u8.newPartial(PARTIAL_BEGIN_TIMESTAMP)
+            s_audio_m3u8.newPartial(PARTIAL_BEGIN_TIMESTAMP)
 
-        while (EMSG_FRAGMENTS): m3u8.push(EMSG_FRAGMENTS.popleft())
-        while (H265_FRAGMENTS): m3u8.push(H265_FRAGMENTS.popleft())
-        while (AAC_FRAGMENTS): m3u8.push(AAC_FRAGMENTS.popleft())
-
+        while (EMSG_FRAGMENTS): video_m3u8.push(EMSG_FRAGMENTS.popleft())
+        while (H265_FRAGMENTS): video_m3u8.push(H265_FRAGMENTS.popleft())
+        for index, AAC_FRAGMENTS in enumerate(AAC_FRAGMENTS_LIST):
+          AAC_M3U8S[index].push(AAC_FRAGMENTS.popleft())
     else:
       pass
 
