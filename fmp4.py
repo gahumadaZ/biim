@@ -10,7 +10,8 @@ import os
 from collections import deque
 
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+import textwrap
 
 from mpeg2ts import ts
 from mpeg2ts.packetize import packetize_section, packetize_pes
@@ -49,7 +50,7 @@ async def main():
 
   parser.add_argument('-i', '--input', type=argparse.FileType('rb'), nargs='?', default=sys.stdin.buffer)
   parser.add_argument('-s', '--SID', type=int, nargs='?')
-  parser.add_argument('-l', '--list_size', type=int, nargs='?', default=3)
+  parser.add_argument('-l', '--list_size', type=int, nargs='?')
   parser.add_argument('-t', '--target_duration', type=int, nargs='?', default=1)
   parser.add_argument('-p', '--part_duration', type=float, nargs='?', default=0.1)
   parser.add_argument('--port', type=int, nargs='?', default=8080)
@@ -60,6 +61,7 @@ async def main():
   p_audio_m3u8 = M3U8(args.target_duration, args.part_duration, args.list_size, True, 'p_a_')
   s_audio_m3u8 = M3U8(args.target_duration, args.part_duration, args.list_size, True, 's_a_')
   video_init, p_audio_init, s_audio_init = asyncio.Future(), asyncio.Future(), asyncio.Future()
+  availabilityStartTime = datetime.now(timezone.utc)
 
   async def master(request):
     text = ''
@@ -69,6 +71,46 @@ async def main():
     text += f'#EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO="Audio"\n'
     text += f'v_playlist.m3u8\n'
     return web.Response(headers={'Access-Control-Allow-Origin': '*'}, text=text, content_type="application/x-mpegURL")
+
+  async def mpd(request):
+    text = textwrap.dedent(f"""
+      <?xml version="1.0" encoding="utf-8"?>
+      <MPD xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xmlns="urn:mpeg:dash:schema:mpd:2011"
+        xmlns:xlink="http://www.w3.org/1999/xlink"
+        xsi:schemaLocation="urn:mpeg:DASH:schema:MPD:2011 http://standards.iso.org/ittf/PubliclyAvailableStandards/MPEG-DASH_schema_files/DASH-MPD.xsd"
+        profiles="urn:mpeg:dash:profile:isoff-live:2011"
+        type="dynamic"
+        minimumUpdatePeriod="PT500S"
+        availabilityStartTime="{(availabilityStartTime).isoformat()}"
+        publishTime="{datetime.now(timezone.utc).isoformat()}"
+        timeShiftBufferDepth="PT1M0.0S"
+        maxSegmentDuration="PT0.5S"
+        minBufferTime="PT0.0S">
+        <ProgramInformation>
+        </ProgramInformation>
+        <ServiceDescription id="0">
+        </ServiceDescription>
+        <Period id="0" start="PT0.0S">
+          <AdaptationSet id="0" contentType="video" startWithSAP="1" segmentAlignment="true" bitstreamSwitching="true" frameRate="30/1" maxWidth="700" maxHeight="60" par="35:3">
+            <Representation id="0" mimeType="video/mp4" codecs="hvc1" bandwidth="328974" width="700" height="60" sar="1:1">
+              <SegmentTemplate timescale="90000" duration="45000" availabilityTimeOffset="0.000" initialization="v_init" media="v_segment?msn=$Number%d$" startNumber="0">
+              </SegmentTemplate>
+            </Representation>
+          </AdaptationSet>
+          <AdaptationSet id="1" contentType="audio" startWithSAP="1" segmentAlignment="true" bitstreamSwitching="true">
+            <Representation id="1" mimeType="audio/mp4" codecs="mp4a.40.2" bandwidth="128000" audioSamplingRate="44100">
+              <AudioChannelConfiguration schemeIdUri="urn:mpeg:dash:23003:3:audio_channel_configuration:2011" value="2" />
+              <SegmentTemplate timescale="90000" duration="45000" availabilityTimeOffset="0.000" initialization="p_a_init" media="p_a_segment?msn=$Number%d$" startNumber="0">
+              </SegmentTemplate>
+            </Representation>
+          </AdaptationSet>
+        </Period>
+        <UTCTiming schemeIdUri="urn:mpeg:dash:utc:http-xsdate:2014" value="https://time.akamai.com/?iso"/>
+      </MPD>
+    """).lstrip()
+    return web.Response(headers={'Access-Control-Allow-Origin': '*'}, text=text, content_type="application/x-mpegURL")
+
 
   def generate_handler(m3u8, init, prefix):
     async def playlist(request):
@@ -119,7 +161,7 @@ async def main():
       if init is None:
         return web.Response(headers={'Access-Control-Allow-Origin': '*'}, status=400, content_type="video/mp4")
 
-      body = await init
+      body = await asyncio.shield(init)
       return web.Response(headers={'Access-Control-Allow-Origin': '*'}, body=body, content_type="video/mp4")
     return playlist, segment, partial, initalization
   video_playlist, video_segment, video_partial, video_initalization = generate_handler(video_m3u8, video_init, "v_")
@@ -130,6 +172,7 @@ async def main():
   app = web.Application()
   app.add_routes([
     web.get('/master.m3u8', master),
+    web.get('/master.mpd', mpd),
 
     web.get('/v_playlist.m3u8', video_playlist),
     web.get('/v_segment', video_segment),
@@ -297,7 +340,6 @@ async def main():
         timestamp = H265.dts() or H265.pts()
         cts =  H265.pts() - timestamp
 
-        samples = []
         for ebsp in H265:
           nal_unit_type = (ebsp[0] >> 1) & 0x3f
 
@@ -309,13 +351,15 @@ async def main():
             PPS = ebsp
           elif nal_unit_type == 0x23: # AUD
             pass
+          elif nal_unit_type == 39 or nal_unit_type == 40: # SEI
+            pass
           else:
             H265_DEQUE.append((nal_unit_type, ebsp, timestamp, cts))
 
         while len(H265_DEQUE) > 1:
           (nalu_type, ebsp, curr_pts, cts) = H265_DEQUE.popleft()
           (_, _, next_pts, _) = H265_DEQUE[0]
-          isKeyframe = (nalu_type == 19 or nalu_type == 20)
+          isKeyframe = (nalu_type == 19 or nalu_type == 20 or nalu_type == 21)
           hasIDR = hasIDR or isKeyframe
           duration = (next_pts - curr_pts + ts.HZ) % ts.HZ
           H265_FRAGMENTS.append(
@@ -365,7 +409,7 @@ async def main():
         while (EMSG_FRAGMENTS): video_m3u8.push(EMSG_FRAGMENTS.popleft())
         while (H265_FRAGMENTS): video_m3u8.push(H265_FRAGMENTS.popleft())
         for index, AAC_FRAGMENTS in enumerate(AAC_FRAGMENTS_LIST):
-          AAC_M3U8S[index].push(AAC_FRAGMENTS.popleft())
+          while AAC_FRAGMENTS: AAC_M3U8S[index].push(AAC_FRAGMENTS.popleft())
     else:
       pass
 

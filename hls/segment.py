@@ -34,7 +34,8 @@ class PartialSegment:
 
   def complete(self, endPTS):
     self.endPTS = endPTS
-    for f in self.futures: f.set_result(bytes(self.buffer))
+    for f in self.futures:
+      if not f.done(): f.set_result(bytes(self.buffer))
 
   def isCompleted(self):
     return self.endPTS is not None
